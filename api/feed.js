@@ -20,6 +20,9 @@ export default async function handler(req, res) {
   const offsetNum = Number(offset) || 0
   const { usuario, token } = await getUsuarioFromRequest(req)
 
+  // DEBUG: confirma se a chamada chegou como autenticada ou não
+  console.log('[debug] tem token?', !!token, '| usuario:', usuario?.id || null)
+
   try {
     // 1. Descobre quais fontes participam (todo o catálogo ativo, menos as bloqueadas do usuário)
     const { data: fontes, error: erroFontes } = await supabase
@@ -49,6 +52,10 @@ export default async function handler(req, res) {
 
             idsBloqueados = new Set((bloqueadas || []).map((b) => b.fonte_id))
             tagsDoUsuario = (tagsRows || []).map((t) => t.tag.toLowerCase())
+
+            // DEBUG: exatamente o que veio do Supabase pro usuário autenticado
+            console.log('[debug] tagsDoUsuario:', tagsDoUsuario)
+            console.log('[debug] idsBloqueados:', [...idsBloqueados])
       }
 
       const fontesValidas = fontes.filter((f) => !idsBloqueados.has(f.id))
@@ -68,6 +75,9 @@ export default async function handler(req, res) {
       // 3. Busca o próximo lote de notícias que esse usuário ainda não viu
       const candidatas = await buscarNaoVistas({ usuarioId: usuario?.id, limite: 90, offset: offsetNum })
       let resultado = candidatas.filter((n) => !idsBloqueados.has(n.fonteId))
+
+      // DEBUG: tamanho em cada etapa, antes de qualquer filtro de tag
+      console.log('[debug] candidatas:', candidatas.length, '| após bloqueio de fonte:', resultado.length)
 
       // 4. Filtro por tag: categoria fixa da fonte OU palavra-chave livre no título/resumo.
       //    Se veio uma tag específica, filtra só por ela. Se é "tudo" (sem tag),
@@ -114,6 +124,9 @@ export default async function handler(req, res) {
       // se o usuário não tem nenhuma tag cadastrada ainda, não tem o que filtrar —
       // mostra tudo mesmo, pra não deixar o feed vazio antes de ele configurar interesses
 
+      // DEBUG: tamanho depois do filtro de tag (esse é o que mais importa agora)
+      console.log('[debug] após filtro de tag:', resultado.length)
+
       // 5. Dilui fontes que publicam demais — evita que uma fonte muito ativa
       //    (ex: DEV Community) tome o lote inteiro só por volume de publicação.
       //    Mantém a ordem de recência dentro do que sobra; se faltar item pra
@@ -142,6 +155,9 @@ export default async function handler(req, res) {
       }
 
       const lote = diluirPorFonte(resultado, MAX_POR_FONTE_NO_LOTE, TAMANHO_LOTE)
+
+      // DEBUG: tamanho final, o que de fato volta pro front-end
+      console.log('[debug] após diluição (lote final):', lote.length)
 
       return res.status(200).json({ noticias: lote })
   } catch (err) {
