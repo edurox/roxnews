@@ -75,11 +75,19 @@ export default async function handler(req, res) {
     // salva como digitada na tela (ex: 'programação'). Sem isso, a comparação
     // exata falha e o match cai pro texto livre, que quase nunca acha a
     // palavra em português dentro de manchete/resumo em inglês.
+    // Categoria é lida AQUI, ao vivo, da tabela fontes_rss — não do que foi
+    // congelado dentro da notícia no Redis no momento do fetch do RSS. Isso
+    // evita que um ajuste de categoria_padrao no Supabase fique "sem efeito"
+    // até o TTL de 30 dias expirar ou a fonte ser buscada de novo.
+    const categoriaPorFonte = new Map(
+      fontes.map((f) => [f.id, (f.categoria_padrao || '').toLowerCase()])
+    )
+
     function normalizar(s) {
       return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     }
     function casaComTag(noticia, tagBusca) {
-      const categoria = normalizar((noticia.categoria || '').toLowerCase())
+      const categoria = normalizar(categoriaPorFonte.get(noticia.fonteId) || '')
       const texto = normalizar(`${noticia.titulo} ${noticia.resumo}`.toLowerCase())
       const tagNormalizada = normalizar(tagBusca)
       return categoria === tagNormalizada || texto.includes(tagNormalizada)
