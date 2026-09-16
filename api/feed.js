@@ -31,10 +31,19 @@ export default async function handler(req, res) {
     let supabaseAuth = null
     if (usuario) {
       supabaseAuth = supabaseComoUsuario(token)
-      const [{ data: bloqueadas }, { data: tagsRows }] = await Promise.all([
+      const [
+        { data: bloqueadas, error: erroBloqueadas },
+        { data: tagsRows, error: erroTags }
+      ] = await Promise.all([
         supabaseAuth.from('fontes_bloqueadas').select('fonte_id').eq('usuario_id', usuario.id),
         supabaseAuth.from('tags_usuario').select('tag').eq('usuario_id', usuario.id)
       ])
+      // Importante: erro de query aqui NÃO pode virar "usuário sem tags" —
+      // isso mascarava token expirado/RLS/rede como se fosse "mostra tudo",
+      // vazando conteúdo fora do filtro do usuário pro feed "tudo".
+      if (erroBloqueadas) throw erroBloqueadas
+      if (erroTags) throw erroTags
+
       idsBloqueados = new Set((bloqueadas || []).map((b) => b.fonte_id))
       tagsDoUsuario = (tagsRows || []).map((t) => t.tag.toLowerCase())
     }

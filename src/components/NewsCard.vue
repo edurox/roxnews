@@ -11,7 +11,17 @@
         referrerpolicy="no-referrer"
         @error="imagemComErro = true"
       >
-      <div v-else class="rox-thumb-fallback" />
+      <div v-else class="rox-thumb-fallback">
+        <img
+          v-if="faviconUrl"
+          :src="faviconUrl"
+          class="rox-thumb-favicon"
+          alt=""
+          loading="lazy"
+          referrerpolicy="no-referrer"
+          @error="faviconComErro = true"
+        >
+      </div>
     </div>
 
     <div class="q-pa-md">
@@ -70,8 +80,24 @@ const emit = defineEmits(['abrir', 'bloquear-fonte', 'vista'])
 const $q = useQuasar()
 const expandido = ref(false)
 const imagemComErro = ref(false)
+const faviconComErro = ref(false)
 const cardRef = ref(null)
 let observer = null
+
+// Fallback pra fontes que simplesmente não mandam imagem no RSS (ex: Hacker
+// News, que é um agregador de links externos — não tem enclosure, media:content
+// nem <img> no corpo, porque o destino é uma página qualquer, não um artigo
+// deles). Em vez de deixar o quadrado vazio, usa o favicon do domínio de
+// destino. Funciona pra qualquer fonte assim, sem precisar cadastrar caso a caso.
+const faviconUrl = computed(() => {
+  if (faviconComErro.value) return null
+  try {
+    const dominio = new URL(props.noticia.link).hostname
+    return `https://www.google.com/s2/favicons?sz=128&domain=${dominio}`
+  } catch {
+    return null
+  }
+})
 
 const horaFormatada = computed(() => {
   const d = new Date(props.noticia.publicadoEm)
@@ -157,6 +183,15 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   background: var(--rox-surface-raised);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rox-thumb-favicon {
+  width: 40px;
+  height: 40px;
+  opacity: 0.6;
 }
 
 .rox-ver-mais {
