@@ -17,6 +17,7 @@ import { processarLoteFilaThumbs } from '../lib/processarFilaThumbs.js'
 import { validarImagem } from '../lib/validarImagem.js'
 import { imagemPareceGenericaPeloNome } from '../lib/imagemGenerica.js'
 import { imagemEhPequenaDemais } from '../lib/dimensaoImagem.js'
+import { idiomaPermitido } from '../lib/filtroIdioma.js'
 
 const CONCORRENCIA_OG_IMAGE = 5
 const LOTE_ENRIQUECIMENTO_OPORTUNISTA = 2
@@ -147,7 +148,7 @@ export default async function handler(req, res) {
         limite: 90,
         offset: offsetNum
       })
-      let resultado = candidatas.filter((n) => !idsBloqueados.has(n.fonteId))
+      let resultado = candidatas.filter((n) => !idsBloqueados.has(n.fonteId) && idiomaPermitido(n))
 
       // 4. Filtro por tag: categoria fixa da fonte OU palavra-chave livre no título/resumo.
       //    Se veio uma tag específica, filtra só por ela. Se é "tudo" (sem tag),
