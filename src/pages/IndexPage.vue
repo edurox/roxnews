@@ -1,7 +1,6 @@
 <template>
   <q-page class="q-pa-md rox-page">
     <div class="row items-center q-mb-md rox-top-bar">
-      <div class="rox-meta col">feed</div>
       <q-btn
         flat
         round
