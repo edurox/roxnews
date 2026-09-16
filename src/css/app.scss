@@ -36,6 +36,8 @@ body {
   line-height: 1.28;
   color: var(--rox-ink);
   letter-spacing: 0.1px;
+  // título de fonte estrangeira às vezes traz URL ou termo longo sem espaço
+  overflow-wrap: anywhere;
 }
 
 .rox-meta {
@@ -49,7 +51,8 @@ body {
   font-family: var(--rox-font-ui);
   color: var(--rox-ink-soft);
   line-height: 1.5;
-  max-width: 68ch;
+  max-width: min(68ch, 100%);
+  overflow-wrap: anywhere;
 }
 
 .rox-card {
