@@ -16,6 +16,7 @@ import { limitarConcorrencia } from '../lib/limitarConcorrencia.js'
 import { processarLoteFilaThumbs } from '../lib/processarFilaThumbs.js'
 import { validarImagem } from '../lib/validarImagem.js'
 import { imagemPareceGenericaPeloNome } from '../lib/imagemGenerica.js'
+import { imagemEhPequenaDemais } from '../lib/dimensaoImagem.js'
 
 const CONCORRENCIA_OG_IMAGE = 5
 const LOTE_ENRIQUECIMENTO_OPORTUNISTA = 2
@@ -81,39 +82,42 @@ export default async function handler(req, res) {
             // é o campo que o próprio site escolheu como imagem oficial do
             // artigo — muito mais confiável que "primeira <img> do corpo".
             //
-            // Além da validação de sempre, as duas candidatas (RSS e og)
-            // passam por `imagemEhGenericaDaFonte`: rejeita ícone/logo/avatar
-            // pelo nome do arquivo, e também rejeita qualquer URL que já
-            // tenha sido aceita antes pra OUTRO artigo da mesma fonte — uma
-            // foto de capa de verdade não se repete entre artigos diferentes,
-            // então repetição é sinal de logo/capa padrão do feed. Isso evita
-            // que esses casos sejam aceitos como thumb "válida" e nunca caiam
-            // na fila de heurística/IA (ver lib/processarFilaThumbs.js).
-            async function imagemEhGenericaDaFonte(url) {
-              if (imagemPareceGenericaPeloNome(url)) return true
+            // imagemEhAceitavel roda 4 filtros em ordem de custo (do mais
+            // barato pro mais caro, pra sair rápido no primeiro que reprovar):
+            //   1. nome do arquivo (regex, de graça) — ícone/logo/avatar óbvio
+            //   2. validarImagem (HEAD) — content-type e tamanho em bytes
+            //   3. reuso pela mesma fonte (Redis) — mesma URL em 2+ artigos
+            //      diferentes é sinal de logo/capa padrão do feed
+            //   4. dimensão REAL da imagem (baixa uns KB de verdade) —
+            //      pega o caso que os 3 anteriores não pegam: um logo/ícone
+            //      quadrado com bastante fundo sólido passa fácil no corte
+            //      de bytes do HEAD, mas continua pequeno de verdade
+            // Isso evita que qualquer um desses casos seja aceito como thumb
+            // "válida" e nunca caia na fila de heurística/IA (ver
+            // lib/processarFilaThumbs.js).
+            async function imagemEhAceitavel(url) {
+              if (!url) return false
+              if (imagemPareceGenericaPeloNome(url)) return false
+              if (!(await validarImagem(url))) return false
               const usos = await contarUsoImagemPorFonte(fonte.id, url)
-              return usos > 1
+              if (usos > 1) return false
+              if (await imagemEhPequenaDemais(url)) return false
+              return true
             }
 
             await limitarConcorrencia(
               noticias.map((n) => async () => {
-                if (
-                  n.imagemUrl &&
-                  !(await imagemEhGenericaDaFonte(n.imagemUrl)) &&
-                  (await validarImagem(n.imagemUrl))
-                ) {
-                  return
-                }
+                if (n.imagemUrl && (await imagemEhAceitavel(n.imagemUrl))) return
 
                 const og = await buscarOgImage(n.link)
-                if (og && !(await imagemEhGenericaDaFonte(og))) {
+                if (og && (await imagemEhAceitavel(og))) {
                   n.imagemUrl = og
                   n.imagemFonte = 'og'
                   n.imagemPaginaOrigem = n.link
                 } else {
                   // nem o RSS nem og:image se sustentam — não deixa a URL
-                  // ruim (ou genérica) passar pro front pra não renderizar
-                  // um logo como se fosse a capa do artigo
+                  // ruim (ou genérica/pequena) passar pro front pra não
+                  // renderizar um logo como se fosse a capa do artigo
                   n.imagemUrl = null
                 }
               }),

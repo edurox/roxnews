@@ -12,6 +12,7 @@
     "@quasar/extras": "^1.16.9",
     "@supabase/supabase-js": "^2.45.0",
     "@upstash/redis": "^1.34.0",
+    "image-size": "^2.0.4",
     "pinia": "^2.1.7",
     "quasar": "^2.16.0",
     "rss-parser": "^3.13.0",
