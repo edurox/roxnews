@@ -7,13 +7,15 @@ import {
   cacheEstaFresco,
   enfileirarSemThumb,
   idDaNoticia,
-  tentarAdquirirLockOportunista
+  tentarAdquirirLockOportunista,
+  contarUsoImagemPorFonte
 } from '../lib/redisClient.js'
 import { buscarFonte } from '../lib/rss.js'
 import { buscarOgImage } from '../lib/ogImage.js'
 import { limitarConcorrencia } from '../lib/limitarConcorrencia.js'
 import { processarLoteFilaThumbs } from '../lib/processarFilaThumbs.js'
 import { validarImagem } from '../lib/validarImagem.js'
+import { imagemPareceGenericaPeloNome } from '../lib/imagemGenerica.js'
 
 const CONCORRENCIA_OG_IMAGE = 5
 const LOTE_ENRIQUECIMENTO_OPORTUNISTA = 2
@@ -78,18 +80,40 @@ export default async function handler(req, res) {
             // passa na validação, tenta og:image da página de destino, que
             // é o campo que o próprio site escolheu como imagem oficial do
             // artigo — muito mais confiável que "primeira <img> do corpo".
+            //
+            // Além da validação de sempre, as duas candidatas (RSS e og)
+            // passam por `imagemEhGenericaDaFonte`: rejeita ícone/logo/avatar
+            // pelo nome do arquivo, e também rejeita qualquer URL que já
+            // tenha sido aceita antes pra OUTRO artigo da mesma fonte — uma
+            // foto de capa de verdade não se repete entre artigos diferentes,
+            // então repetição é sinal de logo/capa padrão do feed. Isso evita
+            // que esses casos sejam aceitos como thumb "válida" e nunca caiam
+            // na fila de heurística/IA (ver lib/processarFilaThumbs.js).
+            async function imagemEhGenericaDaFonte(url) {
+              if (imagemPareceGenericaPeloNome(url)) return true
+              const usos = await contarUsoImagemPorFonte(fonte.id, url)
+              return usos > 1
+            }
+
             await limitarConcorrencia(
               noticias.map((n) => async () => {
-                if (n.imagemUrl && (await validarImagem(n.imagemUrl))) return
+                if (
+                  n.imagemUrl &&
+                  !(await imagemEhGenericaDaFonte(n.imagemUrl)) &&
+                  (await validarImagem(n.imagemUrl))
+                ) {
+                  return
+                }
 
                 const og = await buscarOgImage(n.link)
-                if (og) {
+                if (og && !(await imagemEhGenericaDaFonte(og))) {
                   n.imagemUrl = og
                   n.imagemFonte = 'og'
                   n.imagemPaginaOrigem = n.link
                 } else {
                   // nem o RSS nem og:image se sustentam — não deixa a URL
-                  // ruim do RSS passar pro front pra não renderizar quebrada
+                  // ruim (ou genérica) passar pro front pra não renderizar
+                  // um logo como se fosse a capa do artigo
                   n.imagemUrl = null
                 }
               }),
