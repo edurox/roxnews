@@ -1,0 +1,94 @@
+// ROXNEWS — design tokens
+// Papel escuro (carvão quente), texto pergaminho, acento verde-pinho.
+// Serifada pra título de notícia (leitura longa), mono pra metadados (fonte/data/tag).
+
+@font-face {
+  font-family: 'Source Serif 4';
+  src: local('Source Serif 4');
+}
+
+:root {
+  --rox-bg: #191712;
+  --rox-surface: #221f19;
+  --rox-surface-raised: #2a271f;
+  --rox-ink: #ede6d8;
+  --rox-ink-soft: #a79e8c;
+  --rox-accent: #4f8f6d;
+  --rox-accent-soft: #325a44;
+  --rox-regional: #b98a4e;
+  --rox-line: #35312a;
+  --rox-danger: #b0524a;
+
+  --rox-font-headline: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  --rox-font-meta: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
+  --rox-font-ui: 'Roboto', -apple-system, sans-serif;
+}
+
+body {
+  background: var(--rox-bg);
+  color: var(--rox-ink);
+  font-family: var(--rox-font-ui);
+}
+
+.rox-headline {
+  font-family: var(--rox-font-headline);
+  font-weight: 500;
+  line-height: 1.28;
+  color: var(--rox-ink);
+  letter-spacing: 0.1px;
+}
+
+.rox-meta {
+  font-family: var(--rox-font-meta);
+  font-size: 12px;
+  color: var(--rox-ink-soft);
+  letter-spacing: 0.2px;
+}
+
+.rox-summary {
+  font-family: var(--rox-font-ui);
+  color: var(--rox-ink-soft);
+  line-height: 1.5;
+  max-width: 68ch;
+}
+
+.rox-card {
+  background: var(--rox-surface);
+  border: 1px solid var(--rox-line);
+  border-radius: 6px;
+  transition: border-color 0.15s ease;
+}
+
+.rox-card:hover {
+  border-color: var(--rox-accent-soft);
+}
+
+.rox-day-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 28px 0 14px;
+  color: var(--rox-ink-soft);
+  font-family: var(--rox-font-meta);
+  font-size: 13px;
+}
+
+.rox-day-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--rox-line);
+}
+
+.rox-tag-chip {
+  font-family: var(--rox-font-meta);
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid var(--rox-line);
+  color: var(--rox-ink-soft);
+}
+
+.rox-tag-chip--regional {
+  border-color: var(--rox-regional);
+  color: var(--rox-regional);
+}
