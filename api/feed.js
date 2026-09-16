@@ -13,7 +13,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ erro: 'method not allowed' })
   }
 
-  const { tag } = req.query
+  const { tag, offset } = req.query
+  const offsetNum = Number(offset) || 0
   const { usuario, token } = await getUsuarioFromRequest(req)
 
   try {
@@ -53,17 +54,26 @@ export default async function handler(req, res) {
     )
 
     // 3. Busca o próximo lote de notícias que esse usuário ainda não viu
-    const candidatas = await buscarNaoVistas({ usuarioId: usuario?.id, limite: 90 })
+    const candidatas = await buscarNaoVistas({ usuarioId: usuario?.id, limite: 90, offset: offsetNum })
     let resultado = candidatas.filter((n) => !idsBloqueados.has(n.fonteId))
 
     // 4. Filtro por tag: categoria fixa da fonte OU palavra-chave livre no título/resumo.
     //    Se veio uma tag específica, filtra só por ela. Se é "tudo" (sem tag),
     //    filtra por QUALQUER UMA das tags cadastradas do usuário — "tudo" não é
     //    um feed sem filtro nenhum, é a união de todos os seus interesses.
+    // Remove acentos antes de comparar — categoria_padrao no banco às vezes
+    // está sem acento (ex: 'programacao') enquanto a tag do usuário foi
+    // salva como digitada na tela (ex: 'programação'). Sem isso, a comparação
+    // exata falha e o match cai pro texto livre, que quase nunca acha a
+    // palavra em português dentro de manchete/resumo em inglês.
+    function normalizar(s) {
+      return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    }
     function casaComTag(noticia, tagBusca) {
-      const categoria = (noticia.categoria || '').toLowerCase()
-      const texto = `${noticia.titulo} ${noticia.resumo}`.toLowerCase()
-      return categoria === tagBusca || texto.includes(tagBusca)
+      const categoria = normalizar((noticia.categoria || '').toLowerCase())
+      const texto = normalizar(`${noticia.titulo} ${noticia.resumo}`.toLowerCase())
+      const tagNormalizada = normalizar(tagBusca)
+      return categoria === tagNormalizada || texto.includes(tagNormalizada)
     }
 
     if (tag) {

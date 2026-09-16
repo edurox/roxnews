@@ -34,6 +34,11 @@ export const useFeedStore = defineStore('feed', {
 
         const params = new URLSearchParams()
         if (this.tagAtiva) params.set('tag', this.tagAtiva)
+        // offset real sobre o ZSET no backend — não dependemos mais de
+        // "veio algo repetido?" pra decidir que o feed acabou, porque isso
+        // dava falso-positivo quando o /api/vistas do lote anterior ainda
+        // não tinha sido persistido (ver marcarVista / _enviarVistasPendentes)
+        params.set('offset', String(this.noticias.length))
 
         const resp = await fetch(`/api/feed?${params}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {}
@@ -45,8 +50,8 @@ export const useFeedStore = defineStore('feed', {
         const novas = json.noticias.filter((n) => !idsAtuais.has(n.id))
         this.noticias.push(...novas)
 
-        // nada de novo veio -> chegamos ao fim do que existe pra esse filtro
-        if (novas.length === 0) this.temMais = false
+        // a própria página veio vazia do servidor -> aí sim acabou de verdade
+        if (json.noticias.length === 0) this.temMais = false
       } catch (err) {
         this.erro = err.message
       } finally {
