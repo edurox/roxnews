@@ -90,7 +90,12 @@ export default async function handler(req, res) {
       const categoria = normalizar(categoriaPorFonte.get(noticia.fonteId) || '')
       const texto = normalizar(`${noticia.titulo} ${noticia.resumo}`.toLowerCase())
       const tagNormalizada = normalizar(tagBusca)
-      return categoria === tagNormalizada || texto.includes(tagNormalizada)
+
+      if (categoria === tagNormalizada) return true
+
+        const escapada = tagNormalizada.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const regex = new RegExp(`\\b${escapada}\\b`, 'i')
+        return regex.test(texto)
     }
 
     if (tag) {
