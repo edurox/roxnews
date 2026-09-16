@@ -13,6 +13,7 @@ import { buscarFonte } from '../lib/rss.js'
 import { buscarOgImage } from '../lib/ogImage.js'
 import { limitarConcorrencia } from '../lib/limitarConcorrencia.js'
 import { processarLoteFilaThumbs } from '../lib/processarFilaThumbs.js'
+import { validarImagem } from '../lib/validarImagem.js'
 
 const CONCORRENCIA_OG_IMAGE = 5
 const LOTE_ENRIQUECIMENTO_OPORTUNISTA = 2
@@ -70,22 +71,28 @@ export default async function handler(req, res) {
 
             const noticias = await buscarFonte(fonte)
 
-            // Fase 1: pra quem o RSS não trouxe imagem, tenta og:image da
-            // página de destino antes de salvar. Roda aqui (na atualização
-            // periódica da fonte, não a cada request de usuário) e com
-            // concorrência limitada pra não estourar o tempo da function
-            // nem martelar o site de destino.
+            // Fase 1: valida a imagem que o RSS trouxe (enclosure/media/img
+            // no corpo do post — esse último em especial pode ser qualquer
+            // coisa: um badge, um avatar, um ícone quebrado no meio do
+            // texto, não necessariamente uma capa de verdade). Quando não
+            // passa na validação, tenta og:image da página de destino, que
+            // é o campo que o próprio site escolheu como imagem oficial do
+            // artigo — muito mais confiável que "primeira <img> do corpo".
             await limitarConcorrencia(
-              noticias
-                .filter((n) => !n.imagemUrl)
-                .map((n) => async () => {
-                  const og = await buscarOgImage(n.link)
-                  if (og) {
-                    n.imagemUrl = og
-                    n.imagemFonte = 'og'
-                    n.imagemPaginaOrigem = n.link
-                  }
-                }),
+              noticias.map((n) => async () => {
+                if (n.imagemUrl && (await validarImagem(n.imagemUrl))) return
+
+                const og = await buscarOgImage(n.link)
+                if (og) {
+                  n.imagemUrl = og
+                  n.imagemFonte = 'og'
+                  n.imagemPaginaOrigem = n.link
+                } else {
+                  // nem o RSS nem og:image se sustentam — não deixa a URL
+                  // ruim do RSS passar pro front pra não renderizar quebrada
+                  n.imagemUrl = null
+                }
+              }),
               CONCORRENCIA_OG_IMAGE
             )
 
