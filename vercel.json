@@ -9,5 +9,11 @@
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/$1" },
     { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "crons": [
+    {
+      "path": "/api/enriquecer-thumbs?quantidade=10",
+      "schedule": "*/5 * * * *"
+    }
   ]
 }

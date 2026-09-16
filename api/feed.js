@@ -4,9 +4,15 @@ import {
   salvarNoticia,
   ultimaBuscaFonte,
   marcarBuscaFonte,
-  cacheEstaFresco
+  cacheEstaFresco,
+  enfileirarSemThumb,
+  idDaNoticia
 } from '../lib/redisClient.js'
 import { buscarFonte } from '../lib/rss.js'
+import { buscarOgImage } from '../lib/ogImage.js'
+import { limitarConcorrencia } from '../lib/limitarConcorrencia.js'
+
+const CONCORRENCIA_OG_IMAGE = 5
 
 const TAMANHO_LOTE = 30
 const MAX_POR_FONTE_NO_LOTE = 4
@@ -60,7 +66,36 @@ export default async function handler(req, res) {
           if (cacheEstaFresco(ultima)) return
 
             const noticias = await buscarFonte(fonte)
+
+            // Fase 1: pra quem o RSS não trouxe imagem, tenta og:image da
+            // página de destino antes de salvar. Roda aqui (na atualização
+            // periódica da fonte, não a cada request de usuário) e com
+            // concorrência limitada pra não estourar o tempo da function
+            // nem martelar o site de destino.
+            await limitarConcorrencia(
+              noticias
+                .filter((n) => !n.imagemUrl)
+                .map((n) => async () => {
+                  const og = await buscarOgImage(n.link)
+                  if (og) {
+                    n.imagemUrl = og
+                    n.imagemFonte = 'og'
+                    n.imagemPaginaOrigem = n.link
+                  }
+                }),
+              CONCORRENCIA_OG_IMAGE
+            )
+
             await Promise.all(noticias.map((n) => salvarNoticia(n)))
+
+            // quem continuar sem imagem depois do og:image vai pra fila da
+            // Fase 2/3 (heurística e, se configurada, busca guiada por IA)
+            await Promise.all(
+              noticias
+                .filter((n) => !n.imagemUrl)
+                .map((n) => enfileirarSemThumb(idDaNoticia(n.link)))
+            )
+
             await marcarBuscaFonte(fonte.id)
         })
       )

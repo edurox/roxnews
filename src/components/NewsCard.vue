@@ -22,10 +22,23 @@
           @error="faviconComErro = true"
         >
       </div>
+
+      <a
+        v-if="noticia.imagemFonte === 'ia' && noticia.imagemPaginaOrigem"
+        class="rox-badge-ia"
+        :href="noticia.imagemPaginaOrigem"
+        target="_blank"
+        rel="noopener"
+        :title="`Imagem ilustrativa escolhida por IA${noticia.imagemAutor ? ` · foto de ${noticia.imagemAutor}` : ''} — toque para ver a fonte`"
+        @click.stop
+      >
+        <q-icon name="auto_awesome" size="11px" />
+        img: IA
+      </a>
     </div>
 
     <div class="q-pa-md">
-      <div class="row items-center q-gutter-xs q-mb-xs">
+      <div class="rox-meta-row q-mb-xs">
         <span class="rox-meta">{{ noticia.fonteNome }}</span>
         <span class="rox-meta">·</span>
         <span class="rox-meta">{{ horaFormatada }}</span>
@@ -166,10 +179,34 @@ onBeforeUnmount(() => {
 }
 
 .rox-thumb-wrap {
+  position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
   overflow: hidden;
   border-bottom: 1px solid var(--rox-line);
+}
+
+.rox-badge-ia {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(25, 23, 18, 0.78);
+  backdrop-filter: blur(2px);
+  color: var(--rox-ink-soft);
+  font-family: var(--rox-font-meta);
+  font-size: 10px;
+  letter-spacing: 0.2px;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.rox-badge-ia:hover {
+  color: var(--rox-ink);
 }
 
 .rox-thumb {
@@ -177,6 +214,19 @@ onBeforeUnmount(() => {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+/* gap em vez de q-gutter-xs (margem negativa desalinhava a linha em 4px) */
+.rox-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.rox-meta-row :deep(.q-chip) {
+  margin: 0 0 0 8px;
 }
 
 .rox-thumb-fallback {

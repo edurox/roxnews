@@ -1,7 +1,7 @@
 <template>
   <q-page class="q-pa-md rox-page">
     <q-pull-to-refresh @refresh="atualizar">
-      <div class="row q-gutter-xs q-mb-md items-center">
+      <div class="rox-tag-row q-mb-md">
         <q-chip
           clickable
           :class="['rox-tag-chip', !feed.tagAtiva && 'rox-tag-chip--ativa']"
@@ -38,7 +38,7 @@
       </div>
 
       <q-infinite-scroll :offset="400" :disable="!feed.temMais" @load="carregarProximoLote">
-        <div class="column q-gutter-md">
+        <div class="rox-feed-list">
           <NewsCard
             v-for="noticia in feed.noticias"
             :key="noticia.id"
@@ -128,6 +128,28 @@ onMounted(() => {
 .rox-page {
   max-width: 640px;
   margin: 0 auto;
+}
+
+/* gap em vez de q-gutter-*: as classes de gutter do Quasar usam margem
+   negativa no wrapper + margem positiva nos filhos, o que empurra cada card
+   16px pra direita numa pilha vertical e estoura o layout no mobile. */
+.rox-feed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.rox-tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* q-chip vem com margin: 4px por padrão; zera pra quem controla o
+   espaçamento ser só o gap */
+.rox-tag-row :deep(.q-chip) {
+  margin: 0;
 }
 
 :deep(.rox-tag-chip--ativa) {
