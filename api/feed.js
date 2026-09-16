@@ -6,13 +6,16 @@ import {
   marcarBuscaFonte,
   cacheEstaFresco,
   enfileirarSemThumb,
-  idDaNoticia
+  idDaNoticia,
+  tentarAdquirirLockOportunista
 } from '../lib/redisClient.js'
 import { buscarFonte } from '../lib/rss.js'
 import { buscarOgImage } from '../lib/ogImage.js'
 import { limitarConcorrencia } from '../lib/limitarConcorrencia.js'
+import { processarLoteFilaThumbs } from '../lib/processarFilaThumbs.js'
 
 const CONCORRENCIA_OG_IMAGE = 5
+const LOTE_ENRIQUECIMENTO_OPORTUNISTA = 2
 
 const TAMANHO_LOTE = 30
 const MAX_POR_FONTE_NO_LOTE = 4
@@ -184,6 +187,20 @@ export default async function handler(req, res) {
       }
 
       const lote = diluirPorFonte(resultado, MAX_POR_FONTE_NO_LOTE, TAMANHO_LOTE)
+
+      // Enriquecimento oportunista: no plano Hobby da Vercel, cron só roda
+      // 1x/dia (ver vercel.json), o que é lento demais pra escoar a fila de
+      // thumbs. Em vez disso, processa um lotezinho aqui, "de carona" num
+      // request normal — só quando ninguém mais pegou o lock nos últimos 20s.
+      // Isolado em try/catch próprio: se a IA ou o provedor de imagem falhar,
+      // isso NUNCA pode derrubar a resposta do feed em si.
+      try {
+        if (await tentarAdquirirLockOportunista()) {
+          await processarLoteFilaThumbs(LOTE_ENRIQUECIMENTO_OPORTUNISTA)
+        }
+      } catch (err) {
+        console.error('[roxnews] enriquecimento oportunista falhou (feed segue normal):', err.message)
+      }
 
       // proximoOffset/esgotado vêm do Redis (posição real no ZSET), não do
       // tamanho do lote filtrado — é isso que deixa a paginação avançar de

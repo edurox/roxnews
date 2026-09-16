@@ -12,8 +12,8 @@
   ],
   "crons": [
     {
-      "path": "/api/enriquecer-thumbs?quantidade=10",
-      "schedule": "*/5 * * * *"
+      "path": "/api/enriquecer-thumbs?quantidade=100",
+      "schedule": "0 6 * * *"
     }
   ]
 }
