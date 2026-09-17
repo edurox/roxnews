@@ -108,27 +108,55 @@ export default async function handler(req, res) {
         })
       )
 
-      // 3. Busca o próximo lote de notícias que esse usuário ainda não viu.
-      //    proximoOffset é a posição real que o Redis varreu no ZSET — não é
-      //    o tanto que sobrou depois dos filtros. É isso que devolvemos pro
-      //    front usar na próxima chamada (ver comentário em buscarNaoVistas).
-      const { noticias: candidatas, proximoOffset, esgotado } = await buscarNaoVistas({
-        usuarioId: usuario?.id,
-        limite: 90,
-        offset: offsetNum
-      })
-      // Nunca manda pro cliente uma notícia sem imagem resolvida: o card
-      // sem imagemUrl cai no fallback de favicon do front (NewsCard.vue),
-      // que é exatamente o que não queremos mostrar. Quem ainda não tem
-      // imagem continua normalmente na fila (og:image -> heurística/IA em
-      // background, ver lib/processarFilaThumbs.js) e volta a aparecer no
-      // feed sozinho, pra QUALQUER usuário, na primeira vez que alguém
-      // buscar depois de resolvido — não fica marcado como visto enquanto
-      // está escondido aqui, porque marcarComoVistas só roda quando o
-      // client efetivamente renderiza o card (api/vistas.js).
-      let resultado = candidatas.filter(
-        (n) => !idsBloqueados.has(n.fonteId) && idiomaPermitido(n) && n.imagemUrl
-      )
+      // 3. Busca notícias que esse usuário ainda não viu, ATÉ juntar um lote
+      //    cheio de gente que já tem imagem — em vez de pegar só uma janela
+      //    fixa e devolver uma página fina quando o topo do feed (mais
+      //    recente) tem muita notícia ainda sem thumb. Isso é o que faz o
+      //    "não manda card sem imagem" (filtro abaixo) não custar tempo real
+      //    de espera pro usuário: quem não tá pronto simplesmente não conta
+      //    pra esse lote, e a busca vai um pouco mais fundo no ZSET pra
+      //    compensar, pegando notícia mais antiga (mas já com imagem) no
+      //    lugar. Quem ficou de fora aqui NÃO é descartado — não é marcado
+      //    como visto (isso só acontece quando o client renderiza o card de
+      //    verdade, via api/vistas.js) — só não entra NESSE offset; reaparece
+      //    normalmente numa varredura futura do ZSET assim que tiver imagem.
+      //
+      //    MAX_TENTATIVAS limita quantas rodadas de busca fazemos: cada
+      //    rodada é só leitura no Redis (rápida), então um punhado de rodadas
+      //    extras não arrisca timeout — mas evita loop sem fim se o feed
+      //    inteiro estiver sem imagem por algum motivo.
+      const MAX_TENTATIVAS_BACKFILL = 6
+
+      let offsetAtual = offsetNum
+      let candidatasProntas = []
+      let proximoOffset = offsetNum
+      let esgotado = false
+
+      for (let tentativa = 0; tentativa < MAX_TENTATIVAS_BACKFILL; tentativa++) {
+        const pagina = await buscarNaoVistas({
+          usuarioId: usuario?.id,
+          limite: 90,
+          offset: offsetAtual
+        })
+
+        proximoOffset = pagina.proximoOffset
+        esgotado = pagina.esgotado
+
+        // Nunca manda pro cliente uma notícia sem imagem resolvida: o card
+        // sem imagemUrl cai no fallback de favicon do front (NewsCard.vue),
+        // que é exatamente o que não queremos mostrar.
+        candidatasProntas.push(
+          ...pagina.noticias.filter(
+            (n) => !idsBloqueados.has(n.fonteId) && idiomaPermitido(n) && n.imagemUrl
+          )
+        )
+
+        offsetAtual = proximoOffset
+
+        if (esgotado || candidatasProntas.length >= TAMANHO_LOTE) break
+      }
+
+      let resultado = candidatasProntas
 
       // 4. Filtro por tag: categoria fixa da fonte OU palavra-chave livre no título/resumo.
       //    Se veio uma tag específica, filtra só por ela. Se é "tudo" (sem tag),
