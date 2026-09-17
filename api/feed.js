@@ -117,7 +117,18 @@ export default async function handler(req, res) {
         limite: 90,
         offset: offsetNum
       })
-      let resultado = candidatas.filter((n) => !idsBloqueados.has(n.fonteId) && idiomaPermitido(n))
+      // Nunca manda pro cliente uma notícia sem imagem resolvida: o card
+      // sem imagemUrl cai no fallback de favicon do front (NewsCard.vue),
+      // que é exatamente o que não queremos mostrar. Quem ainda não tem
+      // imagem continua normalmente na fila (og:image -> heurística/IA em
+      // background, ver lib/processarFilaThumbs.js) e volta a aparecer no
+      // feed sozinho, pra QUALQUER usuário, na primeira vez que alguém
+      // buscar depois de resolvido — não fica marcado como visto enquanto
+      // está escondido aqui, porque marcarComoVistas só roda quando o
+      // client efetivamente renderiza o card (api/vistas.js).
+      let resultado = candidatas.filter(
+        (n) => !idsBloqueados.has(n.fonteId) && idiomaPermitido(n) && n.imagemUrl
+      )
 
       // 4. Filtro por tag: categoria fixa da fonte OU palavra-chave livre no título/resumo.
       //    Se veio uma tag específica, filtra só por ela. Se é "tudo" (sem tag),
