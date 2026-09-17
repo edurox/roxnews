@@ -1,3 +1,4 @@
+import { waitUntil } from '@vercel/functions'
 import { supabase, supabaseComoUsuario, getUsuarioFromRequest } from '../lib/supabaseClient.js'
 import {
   buscarNaoVistas,
@@ -26,9 +27,18 @@ const MAX_POR_FONTE_NO_LOTE = 8
 // Teto de tempo pra resolução AO VIVO de thumbs dentro deste request (ver
 // resolverThumbsAoVivo em lib/processarFilaThumbs.js). Separado do
 // ORCAMENTO_OPORTUNISTA_MS (que é pro processamento "de carona" da fila de
-// fundo) porque este aqui é o caminho PRINCIPAL agora: resolve exatamente as
-// notícias que estão prestes a fechar a página atual, não a fila inteira.
-const ORCAMENTO_RESOLUCAO_AO_VIVO_MS = 15_000
+// fundo, e agora roda depois da resposta, via waitUntil) porque este aqui é
+// o caminho PRINCIPAL: resolve exatamente as notícias que estão prestes a
+// fechar a página atual, não a fila inteira.
+//
+// Encurtado de 15s pra 4s de propósito: com o refresh de RSS (passo 2) agora
+// em background, esse é o maior bloco que ainda roda ANTES da resposta —
+// não faz sentido deixar uma página só tentar juntar as 30 notícias
+// "perfeitas" gastando quase 15s. Melhor responder rápido com o que já tem
+// pronto e deixar o scroll infinito do client buscar mais aos poucos — a
+// tela já vai atualizando aos poucos em vez do usuário olhar pra nada por
+// 20+ segundos.
+const ORCAMENTO_RESOLUCAO_AO_VIVO_MS = 4_000
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
@@ -73,47 +83,56 @@ export default async function handler(req, res) {
 
       const fontesValidas = fontes.filter((f) => !idsBloqueados.has(f.id))
 
-      // 2. Pra cada fonte, busca RSS só se o cache estiver velho
-      await Promise.all(
-        fontesValidas.map(async (fonte) => {
-          const ultima = await ultimaBuscaFonte(fonte.id)
-          if (cacheEstaFresco(ultima)) return
+      // 2. Pra cada fonte, busca RSS só se o cache estiver velho.
+      //    Roda em BACKGROUND (waitUntil), sem bloquear a resposta: o que o
+      //    passo 3 usa pra montar o feed já está no Redis de uma busca
+      //    anterior — esse refresh só deixa o cache mais fresco pra PRÓXIMA
+      //    requisição, não precisa segurar a que está em andamento. Antes
+      //    disso era `await`ado aqui na frente de tudo, e cada fonte com
+      //    timeout (8s, ver lib/rss.js) somava direto no tempo até a
+      //    primeira notícia aparecer na tela.
+      waitUntil(
+        Promise.all(
+          fontesValidas.map(async (fonte) => {
+            const ultima = await ultimaBuscaFonte(fonte.id)
+            if (cacheEstaFresco(ultima)) return
 
-            const noticias = await buscarFonte(fonte)
+              const noticias = await buscarFonte(fonte)
 
-            // Fase 1 (só o RÁPIDO, dentro do request): aceita a imagem do
-            // RSS se ela passar nome-de-arquivo + HEAD + reuso pela fonte —
-            // nenhum desses baixa o corpo da imagem, então é seguro rodar
-            // pra toda notícia nova sem arriscar travar a resposta.
-            //
-            // og:image e a checagem de dimensão REAL (que baixa uns KB de
-            // verdade) foram tirados de aqui de propósito: rodar isso
-            // inline, pra toda notícia nova, foi o que causou
-            // FUNCTION_INVOCATION_TIMEOUT. Quem não passa aqui vai pra
-            // fila:sem-thumb e é resolvido em background — og:image
-            // primeiro, heurística/IA depois — em lib/processarFilaThumbs.js.
-            await limitarConcorrencia(
-              noticias.map((n) => async () => {
-                if (n.imagemUrl && (await imagemPassaChecagensRapidas(n.imagemUrl, fonte.id))) {
-                  n.imagemFonte = 'rss'
-                  return
-                }
-                n.imagemUrl = null
-              }),
-              CONCORRENCIA_OG_IMAGE
-            )
+              // Fase 1 (só o RÁPIDO): aceita a imagem do RSS se ela passar
+              // nome-de-arquivo + HEAD + reuso pela fonte — nenhum desses
+              // baixa o corpo da imagem.
+              //
+              // og:image e a checagem de dimensão REAL (que baixa uns KB de
+              // verdade) foram tirados de aqui de propósito. Quem não passa
+              // aqui vai pra fila:sem-thumb e é resolvido em background —
+              // og:image primeiro, heurística/IA depois — em
+              // lib/processarFilaThumbs.js.
+              await limitarConcorrencia(
+                noticias.map((n) => async () => {
+                  if (n.imagemUrl && (await imagemPassaChecagensRapidas(n.imagemUrl, fonte.id))) {
+                    n.imagemFonte = 'rss'
+                    return
+                  }
+                  n.imagemUrl = null
+                }),
+                CONCORRENCIA_OG_IMAGE
+              )
 
-            await Promise.all(noticias.map((n) => salvarNoticia(n)))
+              await Promise.all(noticias.map((n) => salvarNoticia(n)))
 
-            // quem continuar sem imagem depois do og:image vai pra fila da
-            // Fase 2/3 (heurística e, se configurada, busca guiada por IA)
-            await Promise.all(
-              noticias
-              .filter((n) => !n.imagemUrl)
-              .map((n) => enfileirarSemThumb(idDaNoticia(n.link)))
-            )
+              // quem continuar sem imagem depois do og:image vai pra fila da
+              // Fase 2/3 (heurística e, se configurada, busca guiada por IA)
+              await Promise.all(
+                noticias
+                .filter((n) => !n.imagemUrl)
+                .map((n) => enfileirarSemThumb(idDaNoticia(n.link)))
+              )
 
-            await marcarBuscaFonte(fonte.id)
+              await marcarBuscaFonte(fonte.id)
+          })
+        ).catch((err) => {
+          console.error('[roxnews] refresh de fontes em background falhou:', err)
         })
       )
 
@@ -197,7 +216,12 @@ export default async function handler(req, res) {
       }
 
       const MAX_TENTATIVAS_BACKFILL = 6
-      const ORCAMENTO_TOTAL_BACKFILL_MS = 18_000
+      // Encurtado de 18s pra 6s pelo mesmo motivo do ORCAMENTO_RESOLUCAO_AO_VIVO_MS
+      // acima: com o refresh de RSS já em background, isso é o que sobrou no
+      // caminho crítico da resposta — responder rápido com um lote parcial
+      // (o scroll infinito do client completa o resto) vale mais que
+      // insistir até quase estourar o tempo tentando fechar 30 de uma vez.
+      const ORCAMENTO_TOTAL_BACKFILL_MS = 6_000
 
       let offsetAtual = offsetNum
       let candidatasProntas = []
@@ -310,37 +334,45 @@ export default async function handler(req, res) {
 
       const lote = diluirEIntercalarPorFonte(resultado, MAX_POR_FONTE_NO_LOTE, TAMANHO_LOTE)
 
-      // Enriquecimento oportunista: agora é só uma rede de segurança extra
-      // pra escoar fila:sem-thumb (itens que a resolução ao vivo acima não
-      // deu conta a tempo, ou notícia que ninguém pediu recentemente) — o
-      // caminho principal de resolver thumb passou a ser a resolução AO VIVO
-      // do passo 3, não este bloco. Continua isolado em try/catch próprio:
-      // se falhar, isso NUNCA pode derrubar a resposta do feed em si.
-      //
-      // Usa só o tempo que sobrou dentro de um teto global do request
-      // (ORCAMENTO_TOTAL_REQUEST_MS), nunca um orçamento fixo próprio — é
-      // isso que evita somar com a resolução ao vivo e estourar os 30s de
-      // maxDuration da function.
-      const ORCAMENTO_TOTAL_REQUEST_MS = 26_000
-      const orcamentoOportunista = ORCAMENTO_TOTAL_REQUEST_MS - (Date.now() - inicioRequest)
-
-      if (orcamentoOportunista > 1_000) {
-        try {
-          if (await tentarAdquirirLockOportunista()) {
-            await Promise.race([
-              processarLoteFilaThumbs(LOTE_ENRIQUECIMENTO_OPORTUNISTA),
-                               new Promise((resolve) => setTimeout(resolve, orcamentoOportunista))
-            ])
-          }
-        } catch (err) {
-          console.error('[roxnews] enriquecimento oportunista falhou (feed segue normal):', err.message)
-        }
-      }
-
       // proximoOffset/esgotado vêm do Redis (posição real no ZSET), não do
       // tamanho do lote filtrado — é isso que deixa a paginação avançar de
       // verdade mesmo quando muita coisa é descartada nos filtros acima.
-      return res.status(200).json({ noticias: lote, proximoOffset, esgotado })
+      //
+      // Manda a resposta JÁ — o enriquecimento oportunista logo abaixo é só
+      // uma rede de segurança extra (ver comentário dele) e NUNCA deveria
+      // ter ficado no caminho crítico da resposta. Antes disso ele era
+      // `await`ado bem aqui, com teto de ORCAMENTO_TOTAL_REQUEST_MS (26s —
+      // a 4s do maxDuration de 30s da function): ou seja, o código segurava
+      // a resposta de propósito até quase o limite da function. Essa era a
+      // maior fatia dos ~24s que o feed levava pra aparecer.
+      res.status(200).json({ noticias: lote, proximoOffset, esgotado })
+
+      // Enriquecimento oportunista: uma rede de segurança extra pra escoar
+      // fila:sem-thumb (itens que a resolução ao vivo do passo 3 não deu
+      // conta a tempo, ou notícia que ninguém pediu recentemente) — o
+      // caminho principal de resolver thumb é a resolução AO VIVO do passo
+      // 3, não este bloco. Roda DEPOIS da resposta já ter sido enviada, via
+      // waitUntil (mantém a function viva só pra isso, sem o usuário
+      // esperar por ela). Isolado em try/catch próprio porque, se a
+      // function for reciclada antes de terminar, tudo bem: o que sobrar
+      // continua em fila:sem-thumb e é pego de novo no cron diário ou numa
+      // resolução ao vivo futura — nada se perde, só demora mais pra ganhar
+      // thumb.
+      const ORCAMENTO_OPORTUNISTA_MS = 8_000
+      waitUntil(
+        (async () => {
+          try {
+            if (await tentarAdquirirLockOportunista()) {
+              await Promise.race([
+                processarLoteFilaThumbs(LOTE_ENRIQUECIMENTO_OPORTUNISTA),
+                                 new Promise((resolve) => setTimeout(resolve, ORCAMENTO_OPORTUNISTA_MS))
+              ])
+            }
+          } catch (err) {
+            console.error('[roxnews] enriquecimento oportunista falhou (resposta já tinha sido enviada normalmente):', err.message)
+          }
+        })()
+      )
   } catch (err) {
     console.error('[roxnews] erro em /api/feed:', err)
     return res.status(500).json({ erro: 'falha ao montar o feed' })
