@@ -21,7 +21,7 @@ const CONCORRENCIA_OG_IMAGE = 5
 const LOTE_ENRIQUECIMENTO_OPORTUNISTA = 2
 
 const TAMANHO_LOTE = 30
-const MAX_POR_FONTE_NO_LOTE = 4
+const MAX_POR_FONTE_NO_LOTE = 8
 
 // Teto de tempo pra resolução AO VIVO de thumbs dentro deste request (ver
 // resolverThumbsAoVivo em lib/processarFilaThumbs.js). Separado do
@@ -245,34 +245,51 @@ export default async function handler(req, res) {
       // se o usuário não tem nenhuma tag cadastrada ainda, não tem o que filtrar —
       // mostra tudo mesmo, pra não deixar o feed vazio antes de ele configurar interesses
 
-      // 5. Dilui fontes que publicam demais — evita que uma fonte muito ativa
-      //    (ex: DEV Community) tome o lote inteiro só por volume de publicação.
-      //    Mantém a ordem de recência dentro do que sobra; se faltar item pra
-      //    fechar o lote (poucas fontes ativas nesse trecho), completa com o
-      //    excedente pra não devolver menos notícia do que precisa.
-      function diluirPorFonte(lista, maxPorFonte, tamanhoLote) {
-        const contagem = new Map()
-        const aceitas = []
-        const excedentes = []
+      // 5. Dilui E intercala fontes — evita tanto uma fonte muito ativa
+      //    tomar o lote inteiro (teto por fonte) quanto várias notícias
+      //    seguidas da mesma fonte aparecerem juntas no feed (round-robin).
+      //
+      //    `resultado` já vem ordenado por recência (mais nova primeiro).
+      //    Group by fonteId preserva essa ordem DENTRO de cada grupo. O
+      //    round-robin pega a próxima notícia de cada fonte por vez, na
+      //    ordem em que as fontes apareceram pela primeira vez em
+      //    `resultado` (ou seja, a fonte com a notícia mais recente joga
+      //    primeiro a cada rodada) — assim o feed continua favorecendo o
+      //    que é mais novo no geral, só sem empilhar a mesma fonte.
+      function diluirEIntercalarPorFonte(lista, maxPorFonte, tamanhoLote) {
+        const porFonte = new Map()
 
         for (const noticia of lista) {
-          const atual = contagem.get(noticia.fonteId) || 0
-          if (atual < maxPorFonte) {
-            aceitas.push(noticia)
-            contagem.set(noticia.fonteId, atual + 1)
-          } else {
-            excedentes.push(noticia)
+          let grupo = porFonte.get(noticia.fonteId)
+          if (!grupo) {
+            grupo = []
+            porFonte.set(noticia.fonteId, grupo)
           }
+          if (grupo.length < maxPorFonte) grupo.push(noticia)
         }
 
-        if (aceitas.length < tamanhoLote) {
-          aceitas.push(...excedentes.slice(0, tamanhoLote - aceitas.length))
+        const ordemFontes = [...porFonte.keys()]
+        const intercalado = []
+
+        for (let indice = 0; intercalado.length < tamanhoLote; indice++) {
+          let adicionouAlgo = false
+          for (const fonteId of ordemFontes) {
+            const grupo = porFonte.get(fonteId)
+            if (indice < grupo.length) {
+              intercalado.push(grupo[indice])
+              adicionouAlgo = true
+              if (intercalado.length >= tamanhoLote) break
+            }
+          }
+          // nenhuma fonte tinha mais nada nessa rodada — todas as fontes
+          // esgotaram o próprio teto/estoque, não tem mais o que intercalar
+          if (!adicionouAlgo) break
         }
 
-        return aceitas.slice(0, tamanhoLote)
+        return intercalado
       }
 
-      const lote = diluirPorFonte(resultado, MAX_POR_FONTE_NO_LOTE, TAMANHO_LOTE)
+      const lote = diluirEIntercalarPorFonte(resultado, MAX_POR_FONTE_NO_LOTE, TAMANHO_LOTE)
 
       // Enriquecimento oportunista: agora é só uma rede de segurança extra
       // pra escoar fila:sem-thumb (itens que a resolução ao vivo acima não
