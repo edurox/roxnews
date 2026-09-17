@@ -75,13 +75,22 @@ export default async function handler(req, res) {
 
             const noticias = await buscarFonte(fonte)
 
-            // Fase 1: valida a imagem que o RSS trouxe (enclosure/media/img
-            // no corpo do post — esse último em especial pode ser qualquer
-            // coisa: um badge, um avatar, um ícone quebrado no meio do
-            // texto, não necessariamente uma capa de verdade). Quando não
-            // passa na validação, tenta og:image da página de destino, que
-            // é o campo que o próprio site escolheu como imagem oficial do
-            // artigo — muito mais confiável que "primeira <img> do corpo".
+            // Fase 1: og:image primeiro. É o campo que o PRÓPRIO site marca
+            // como imagem oficial do artigo — a "maior imagem que aparece
+            // primeiro na página", escolhida pelo autor/CMS, não uma
+            // adivinhação nossa. RSS (enclosure/media/img no corpo) só entra
+            // como reforço se o og:image falhar ou for reprovado, porque
+            // enclosure de RSS pode ser qualquer coisa: um badge, um avatar,
+            // ou o ícone do site quando o feed não tem imagem própria pro
+            // post (foi exatamente esse caso que motivou a inversão — um
+            // "site icon" do WordPress, tipo cropped-nome-512x270.png,
+            // passava batido pelos filtros de nome/tamanho porque tem
+            // dimensão grande o bastante, e a gente nem chegava a testar
+            // o og:image real da página).
+            //
+            // Custo extra de rede (busca a página de cada notícia nova, em
+            // vez de só quando o RSS falha) é absorvido pelo cache de 14
+            // dias em buscarOgImage — só paga essa busca uma vez por link.
             //
             // imagemEhAceitavel roda 4 filtros em ordem de custo (do mais
             // barato pro mais caro, pra sair rápido no primeiro que reprovar):
@@ -108,19 +117,23 @@ export default async function handler(req, res) {
 
             await limitarConcorrencia(
               noticias.map((n) => async () => {
-                if (n.imagemUrl && (await imagemEhAceitavel(n.imagemUrl))) return
-
                 const og = await buscarOgImage(n.link)
                 if (og && (await imagemEhAceitavel(og))) {
                   n.imagemUrl = og
                   n.imagemFonte = 'og'
                   n.imagemPaginaOrigem = n.link
-                } else {
-                  // nem o RSS nem og:image se sustentam — não deixa a URL
-                  // ruim (ou genérica/pequena) passar pro front pra não
-                  // renderizar um logo como se fosse a capa do artigo
-                  n.imagemUrl = null
+                  return
                 }
+
+                if (n.imagemUrl && (await imagemEhAceitavel(n.imagemUrl))) {
+                  n.imagemFonte = 'rss'
+                  return
+                }
+
+                // nem og:image nem RSS se sustentam — não deixa a URL ruim
+                // (ou genérica/pequena) passar pro front pra não renderizar
+                // um logo como se fosse a capa do artigo
+                n.imagemUrl = null
               }),
               CONCORRENCIA_OG_IMAGE
             )
