@@ -109,8 +109,8 @@ export default async function handler(req, res) {
             // Fase 2/3 (heurística e, se configurada, busca guiada por IA)
             await Promise.all(
               noticias
-                .filter((n) => !n.imagemUrl)
-                .map((n) => enfileirarSemThumb(idDaNoticia(n.link)))
+              .filter((n) => !n.imagemUrl)
+              .map((n) => enfileirarSemThumb(idDaNoticia(n.link)))
             )
 
             await marcarBuscaFonte(fonte.id)
@@ -144,63 +144,7 @@ export default async function handler(req, res) {
       //    resolução ao vivo — por isso também checamos o orçamento total do
       //    request entre rodadas, pra nunca estourar o maxDuration da
       //    function por acumular rodada atrás de rodada.
-      const MAX_TENTATIVAS_BACKFILL = 6
-      const ORCAMENTO_TOTAL_BACKFILL_MS = 18_000
-
-      let offsetAtual = offsetNum
-      let candidatasProntas = []
-      let proximoOffset = offsetNum
-      let esgotado = false
-
-      for (let tentativa = 0; tentativa < MAX_TENTATIVAS_BACKFILL; tentativa++) {
-        if (Date.now() - inicioRequest > ORCAMENTO_TOTAL_BACKFILL_MS) break
-
-        const pagina = await buscarNaoVistas({
-          usuarioId: usuario?.id,
-          limite: 90,
-          offset: offsetAtual
-        })
-
-        proximoOffset = pagina.proximoOffset
-        esgotado = pagina.esgotado
-
-        const elegiveis = pagina.noticias.filter(
-          (n) => !idsBloqueados.has(n.fonteId) && idiomaPermitido(n)
-        )
-
-        const comImagem = elegiveis.filter((n) => n.imagemUrl)
-        const semImagem = elegiveis.filter((n) => !n.imagemUrl)
-
-        candidatasProntas.push(...comImagem)
-
-        // só resolve ao vivo o suficiente pra fechar o lote (com uma margem,
-        // já que nem toda tentativa de resolução acha imagem) — não gasta
-        // tempo/cota de IA resolvendo notícia que nem vai entrar na página
-        const faltam = TAMANHO_LOTE - candidatasProntas.length
-        const orcamentoRestante = ORCAMENTO_RESOLUCAO_AO_VIVO_MS - (Date.now() - inicioRequest)
-
-        if (faltam > 0 && semImagem.length > 0 && orcamentoRestante > 0) {
-          const paraResolver = semImagem.slice(0, faltam * 2)
-          await resolverThumbsAoVivo(
-            paraResolver.map((n) => n.id),
-            orcamentoRestante
-          )
-
-          // recarrega do Redis pra pegar o imagemUrl que acabou de ser
-          // gravado por resolverThumbsAoVivo (a notícia em `semImagem` ainda
-          // tem o snapshot de antes da resolução)
-          const relidas = await buscarNoticiasPorIds(paraResolver.map((n) => n.id))
-          candidatasProntas.push(...relidas.filter((n) => n && n.imagemUrl))
-        }
-
-        offsetAtual = proximoOffset
-
-        if (esgotado || candidatasProntas.length >= TAMANHO_LOTE) break
-      }
-
-      let resultado = candidatasProntas
-
-      // 4. Filtro por tag: categoria fixa da fonte OU palavra-chave livre no título/resumo.
+      // 3a. Filtro por tag: categoria fixa da fonte OU palavra-chave livre no título/resumo.
       //    Se veio uma tag específica, filtra só por ela. Se é "tudo" (sem tag),
       //    filtra por QUALQUER UMA das tags cadastradas do usuário — "tudo" não é
       //    um feed sem filtro nenhum, é a união de todos os seus interesses.
@@ -236,16 +180,91 @@ export default async function handler(req, res) {
           return regex.test(texto)
       }
 
-      if (tag) {
-        const tagBusca = tag.toLowerCase()
-        resultado = resultado.filter((n) => casaComTag(n, tagBusca))
-      } else if (tagsDoUsuario.length > 0) {
-        resultado = resultado.filter((n) => tagsDoUsuario.some((t) => casaComTag(n, t)))
+      // Usada dentro do laço de backfill abaixo — precisa decidir "essa notícia
+      // sobrevive ao filtro de tag?" ANTES de decidirmos se já juntamos lote
+      // suficiente, senão o laço para cedo demais (ver comentário grande do
+      // laço logo abaixo).
+      function passaFiltroTag(noticia) {
+        if (tag) {
+          return casaComTag(noticia, tag.toLowerCase())
+        }
+        if (tagsDoUsuario.length > 0) {
+          return tagsDoUsuario.some((t) => casaComTag(noticia, t))
+        }
+        // sem tag específica e sem tags cadastradas: não tem o que filtrar —
+        // mostra tudo mesmo, pra não deixar o feed vazio antes de configurar interesses
+        return true
       }
-      // se o usuário não tem nenhuma tag cadastrada ainda, não tem o que filtrar —
-      // mostra tudo mesmo, pra não deixar o feed vazio antes de ele configurar interesses
 
-      // 5. Dilui E intercala fontes — evita tanto uma fonte muito ativa
+      const MAX_TENTATIVAS_BACKFILL = 6
+      const ORCAMENTO_TOTAL_BACKFILL_MS = 18_000
+
+      let offsetAtual = offsetNum
+      let candidatasProntas = []
+      let proximoOffset = offsetNum
+      let esgotado = false
+
+      for (let tentativa = 0; tentativa < MAX_TENTATIVAS_BACKFILL; tentativa++) {
+        if (Date.now() - inicioRequest > ORCAMENTO_TOTAL_BACKFILL_MS) break
+
+          const pagina = await buscarNaoVistas({
+            usuarioId: usuario?.id,
+            limite: 90,
+            offset: offsetAtual
+          })
+
+          proximoOffset = pagina.proximoOffset
+          esgotado = pagina.esgotado
+
+          // O filtro de tag entra JUNTO com fonte bloqueada e idioma, aqui dentro
+          // do laço — não depois que o laço já decidiu que tem lote suficiente.
+          // Se filtrássemos só depois (como era antes), o laço parava assim que
+          // achasse 30 notícias com imagem de QUALQUER assunto, descartava a
+          // maioria no filtro de tag, e nunca voltava a buscar mais fundo no
+          // Redis pra compensar — é isso que fazia uma tag como "tech" mostrar
+          // só 10-15 notícias mesmo tendo dezenas no Redis: o laço já tinha
+          // desistido de buscar antes do filtro de tag entrar em ação.
+          const elegiveis = pagina.noticias.filter(
+            (n) => !idsBloqueados.has(n.fonteId) && idiomaPermitido(n) && passaFiltroTag(n)
+          )
+
+          const comImagem = elegiveis.filter((n) => n.imagemUrl)
+          const semImagem = elegiveis.filter((n) => !n.imagemUrl)
+
+          candidatasProntas.push(...comImagem)
+
+          // só resolve ao vivo o suficiente pra fechar o lote (com uma margem,
+          // já que nem toda tentativa de resolução acha imagem) — não gasta
+          // tempo/cota de IA resolvendo notícia que nem vai entrar na página
+          const faltam = TAMANHO_LOTE - candidatasProntas.length
+          const orcamentoRestante = ORCAMENTO_RESOLUCAO_AO_VIVO_MS - (Date.now() - inicioRequest)
+
+          if (faltam > 0 && semImagem.length > 0 && orcamentoRestante > 0) {
+            const paraResolver = semImagem.slice(0, faltam * 2)
+            await resolverThumbsAoVivo(
+              paraResolver.map((n) => n.id),
+                                       orcamentoRestante
+            )
+
+            // recarrega do Redis pra pegar o imagemUrl que acabou de ser
+            // gravado por resolverThumbsAoVivo (a notícia em `semImagem` ainda
+            // tem o snapshot de antes da resolução)
+            const relidas = await buscarNoticiasPorIds(paraResolver.map((n) => n.id))
+            candidatasProntas.push(...relidas.filter((n) => n && n.imagemUrl))
+          }
+
+          offsetAtual = proximoOffset
+
+          if (esgotado || candidatasProntas.length >= TAMANHO_LOTE) break
+      }
+
+      // resultado já sai filtrado por fonte bloqueada + idioma + tag, porque
+      // esses três critérios agora entram dentro do laço de backfill acima
+      // (ver passaFiltroTag) — é isso que garante que o laço só para quando
+      // realmente juntou notícias suficientes que sobrevivem a todos os filtros.
+      const resultado = candidatasProntas
+
+      // 4. Dilui E intercala fontes — evita tanto uma fonte muito ativa
       //    tomar o lote inteiro (teto por fonte) quanto várias notícias
       //    seguidas da mesma fonte aparecerem juntas no feed (round-robin).
       //
@@ -310,7 +329,7 @@ export default async function handler(req, res) {
           if (await tentarAdquirirLockOportunista()) {
             await Promise.race([
               processarLoteFilaThumbs(LOTE_ENRIQUECIMENTO_OPORTUNISTA),
-              new Promise((resolve) => setTimeout(resolve, orcamentoOportunista))
+                               new Promise((resolve) => setTimeout(resolve, orcamentoOportunista))
             ])
           }
         } catch (err) {
