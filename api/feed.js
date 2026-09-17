@@ -1,6 +1,7 @@
 import { supabase, supabaseComoUsuario, getUsuarioFromRequest } from '../lib/supabaseClient.js'
 import {
   buscarNaoVistas,
+  buscarNoticiasPorIds,
   salvarNoticia,
   ultimaBuscaFonte,
   marcarBuscaFonte,
@@ -12,7 +13,7 @@ import {
 } from '../lib/redisClient.js'
 import { buscarFonte } from '../lib/rss.js'
 import { limitarConcorrencia } from '../lib/limitarConcorrencia.js'
-import { processarLoteFilaThumbs } from '../lib/processarFilaThumbs.js'
+import { processarLoteFilaThumbs, resolverThumbsAoVivo } from '../lib/processarFilaThumbs.js'
 import { imagemPassaChecagensRapidas } from '../lib/imagemEhAceitavel.js'
 import { idiomaPermitido } from '../lib/filtroIdioma.js'
 
@@ -22,11 +23,19 @@ const LOTE_ENRIQUECIMENTO_OPORTUNISTA = 2
 const TAMANHO_LOTE = 30
 const MAX_POR_FONTE_NO_LOTE = 4
 
+// Teto de tempo pra resolução AO VIVO de thumbs dentro deste request (ver
+// resolverThumbsAoVivo em lib/processarFilaThumbs.js). Separado do
+// ORCAMENTO_OPORTUNISTA_MS (que é pro processamento "de carona" da fila de
+// fundo) porque este aqui é o caminho PRINCIPAL agora: resolve exatamente as
+// notícias que estão prestes a fechar a página atual, não a fila inteira.
+const ORCAMENTO_RESOLUCAO_AO_VIVO_MS = 15_000
+
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({ erro: 'method not allowed' })
   }
 
+  const inicioRequest = Date.now()
   const { tag, offset } = req.query
   const offsetNum = Number(offset) || 0
   const { usuario, token } = await getUsuarioFromRequest(req)
@@ -111,21 +120,32 @@ export default async function handler(req, res) {
       // 3. Busca notícias que esse usuário ainda não viu, ATÉ juntar um lote
       //    cheio de gente que já tem imagem — em vez de pegar só uma janela
       //    fixa e devolver uma página fina quando o topo do feed (mais
-      //    recente) tem muita notícia ainda sem thumb. Isso é o que faz o
-      //    "não manda card sem imagem" (filtro abaixo) não custar tempo real
-      //    de espera pro usuário: quem não tá pronto simplesmente não conta
-      //    pra esse lote, e a busca vai um pouco mais fundo no ZSET pra
-      //    compensar, pegando notícia mais antiga (mas já com imagem) no
-      //    lugar. Quem ficou de fora aqui NÃO é descartado — não é marcado
-      //    como visto (isso só acontece quando o client renderiza o card de
-      //    verdade, via api/vistas.js) — só não entra NESSE offset; reaparece
-      //    normalmente numa varredura futura do ZSET assim que tiver imagem.
+      //    recente) tem muita notícia ainda sem thumb.
+      //
+      //    Quem não tem imagem AINDA não é descartado nem pulado: é
+      //    resolvido AO VIVO aqui mesmo (ver resolverThumbsAoVivo em
+      //    lib/processarFilaThumbs.js), porque essas são exatamente as
+      //    notícias prestes a entrar nesta página — vale a pena gastar
+      //    tempo com elas, ao contrário de pré-processar a fila inteira em
+      //    background sem saber o que vai ser visto. O scroll do usuário dá
+      //    folga de sobra pro tempo que isso leva.
+      //
+      //    Só quem realmente não resolveu dentro do orçamento desta leva
+      //    (ORCAMENTO_RESOLUCAO_AO_VIVO_MS) fica de fora — e nesse caso cai
+      //    na fila:sem-thumb como rede de segurança/retry (cron ou uma
+      //    leva ao vivo futura pegam de novo), não é perdido. Quem ficou de
+      //    fora aqui NÃO é marcado como visto (isso só acontece quando o
+      //    client renderiza o card de verdade, via api/vistas.js) — só não
+      //    entra NESSE offset; reaparece normalmente numa varredura futura
+      //    do ZSET assim que tiver imagem.
       //
       //    MAX_TENTATIVAS limita quantas rodadas de busca fazemos: cada
-      //    rodada é só leitura no Redis (rápida), então um punhado de rodadas
-      //    extras não arrisca timeout — mas evita loop sem fim se o feed
-      //    inteiro estiver sem imagem por algum motivo.
+      //    rodada envolve leitura no Redis mais, no pior caso, uma leva de
+      //    resolução ao vivo — por isso também checamos o orçamento total do
+      //    request entre rodadas, pra nunca estourar o maxDuration da
+      //    function por acumular rodada atrás de rodada.
       const MAX_TENTATIVAS_BACKFILL = 6
+      const ORCAMENTO_TOTAL_BACKFILL_MS = 18_000
 
       let offsetAtual = offsetNum
       let candidatasProntas = []
@@ -133,6 +153,8 @@ export default async function handler(req, res) {
       let esgotado = false
 
       for (let tentativa = 0; tentativa < MAX_TENTATIVAS_BACKFILL; tentativa++) {
+        if (Date.now() - inicioRequest > ORCAMENTO_TOTAL_BACKFILL_MS) break
+
         const pagina = await buscarNaoVistas({
           usuarioId: usuario?.id,
           limite: 90,
@@ -142,14 +164,34 @@ export default async function handler(req, res) {
         proximoOffset = pagina.proximoOffset
         esgotado = pagina.esgotado
 
-        // Nunca manda pro cliente uma notícia sem imagem resolvida: o card
-        // sem imagemUrl cai no fallback de favicon do front (NewsCard.vue),
-        // que é exatamente o que não queremos mostrar.
-        candidatasProntas.push(
-          ...pagina.noticias.filter(
-            (n) => !idsBloqueados.has(n.fonteId) && idiomaPermitido(n) && n.imagemUrl
-          )
+        const elegiveis = pagina.noticias.filter(
+          (n) => !idsBloqueados.has(n.fonteId) && idiomaPermitido(n)
         )
+
+        const comImagem = elegiveis.filter((n) => n.imagemUrl)
+        const semImagem = elegiveis.filter((n) => !n.imagemUrl)
+
+        candidatasProntas.push(...comImagem)
+
+        // só resolve ao vivo o suficiente pra fechar o lote (com uma margem,
+        // já que nem toda tentativa de resolução acha imagem) — não gasta
+        // tempo/cota de IA resolvendo notícia que nem vai entrar na página
+        const faltam = TAMANHO_LOTE - candidatasProntas.length
+        const orcamentoRestante = ORCAMENTO_RESOLUCAO_AO_VIVO_MS - (Date.now() - inicioRequest)
+
+        if (faltam > 0 && semImagem.length > 0 && orcamentoRestante > 0) {
+          const paraResolver = semImagem.slice(0, faltam * 2)
+          await resolverThumbsAoVivo(
+            paraResolver.map((n) => n.id),
+            orcamentoRestante
+          )
+
+          // recarrega do Redis pra pegar o imagemUrl que acabou de ser
+          // gravado por resolverThumbsAoVivo (a notícia em `semImagem` ainda
+          // tem o snapshot de antes da resolução)
+          const relidas = await buscarNoticiasPorIds(paraResolver.map((n) => n.id))
+          candidatasProntas.push(...relidas.filter((n) => n && n.imagemUrl))
+        }
 
         offsetAtual = proximoOffset
 
@@ -232,31 +274,31 @@ export default async function handler(req, res) {
 
       const lote = diluirPorFonte(resultado, MAX_POR_FONTE_NO_LOTE, TAMANHO_LOTE)
 
-      // Enriquecimento oportunista: no plano Hobby da Vercel, cron só roda
-      // 1x/dia (ver vercel.json), o que é lento demais pra escoar a fila de
-      // thumbs. Em vez disso, processa um lotezinho aqui, "de carona" num
-      // request normal — só quando ninguém mais pegou o lock nos últimos 20s.
-      // Isolado em try/catch próprio: se a IA ou o provedor de imagem falhar,
-      // isso NUNCA pode derrubar a resposta do feed em si.
+      // Enriquecimento oportunista: agora é só uma rede de segurança extra
+      // pra escoar fila:sem-thumb (itens que a resolução ao vivo acima não
+      // deu conta a tempo, ou notícia que ninguém pediu recentemente) — o
+      // caminho principal de resolver thumb passou a ser a resolução AO VIVO
+      // do passo 3, não este bloco. Continua isolado em try/catch próprio:
+      // se falhar, isso NUNCA pode derrubar a resposta do feed em si.
       //
-      // Agora que resolverThumb tenta og:image antes da IA (ver
-      // lib/processarFilaThumbs.js), cada item pode envolver 2 requests de
-      // rede reais (página + imagem), não só uma chamada de IA/heurística.
-      // Por isso o teto de tempo próprio aqui: se passar de
-      // ORCAMENTO_OPORTUNISTA_MS, desiste e responde o feed do mesmo jeito —
-      // o que não deu tempo de processar continua na fila pro próximo
-      // request ou pro cron. Nunca deixa esse "de carona" comer o orçamento
-      // inteiro dos 30s da function.
-      const ORCAMENTO_OPORTUNISTA_MS = 12_000
-      try {
-        if (await tentarAdquirirLockOportunista()) {
-          await Promise.race([
-            processarLoteFilaThumbs(LOTE_ENRIQUECIMENTO_OPORTUNISTA),
-            new Promise((resolve) => setTimeout(resolve, ORCAMENTO_OPORTUNISTA_MS))
-          ])
+      // Usa só o tempo que sobrou dentro de um teto global do request
+      // (ORCAMENTO_TOTAL_REQUEST_MS), nunca um orçamento fixo próprio — é
+      // isso que evita somar com a resolução ao vivo e estourar os 30s de
+      // maxDuration da function.
+      const ORCAMENTO_TOTAL_REQUEST_MS = 26_000
+      const orcamentoOportunista = ORCAMENTO_TOTAL_REQUEST_MS - (Date.now() - inicioRequest)
+
+      if (orcamentoOportunista > 1_000) {
+        try {
+          if (await tentarAdquirirLockOportunista()) {
+            await Promise.race([
+              processarLoteFilaThumbs(LOTE_ENRIQUECIMENTO_OPORTUNISTA),
+              new Promise((resolve) => setTimeout(resolve, orcamentoOportunista))
+            ])
+          }
+        } catch (err) {
+          console.error('[roxnews] enriquecimento oportunista falhou (feed segue normal):', err.message)
         }
-      } catch (err) {
-        console.error('[roxnews] enriquecimento oportunista falhou (feed segue normal):', err.message)
       }
 
       // proximoOffset/esgotado vêm do Redis (posição real no ZSET), não do
