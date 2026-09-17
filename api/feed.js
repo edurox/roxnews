@@ -11,12 +11,9 @@ import {
   contarUsoImagemPorFonte
 } from '../lib/redisClient.js'
 import { buscarFonte } from '../lib/rss.js'
-import { buscarOgImage } from '../lib/ogImage.js'
 import { limitarConcorrencia } from '../lib/limitarConcorrencia.js'
 import { processarLoteFilaThumbs } from '../lib/processarFilaThumbs.js'
-import { validarImagem } from '../lib/validarImagem.js'
-import { imagemPareceGenericaPeloNome } from '../lib/imagemGenerica.js'
-import { imagemEhPequenaDemais } from '../lib/dimensaoImagem.js'
+import { imagemPassaChecagensRapidas } from '../lib/imagemEhAceitavel.js'
 import { idiomaPermitido } from '../lib/filtroIdioma.js'
 
 const CONCORRENCIA_OG_IMAGE = 5
@@ -75,64 +72,23 @@ export default async function handler(req, res) {
 
             const noticias = await buscarFonte(fonte)
 
-            // Fase 1: og:image primeiro. É o campo que o PRÓPRIO site marca
-            // como imagem oficial do artigo — a "maior imagem que aparece
-            // primeiro na página", escolhida pelo autor/CMS, não uma
-            // adivinhação nossa. RSS (enclosure/media/img no corpo) só entra
-            // como reforço se o og:image falhar ou for reprovado, porque
-            // enclosure de RSS pode ser qualquer coisa: um badge, um avatar,
-            // ou o ícone do site quando o feed não tem imagem própria pro
-            // post (foi exatamente esse caso que motivou a inversão — um
-            // "site icon" do WordPress, tipo cropped-nome-512x270.png,
-            // passava batido pelos filtros de nome/tamanho porque tem
-            // dimensão grande o bastante, e a gente nem chegava a testar
-            // o og:image real da página).
+            // Fase 1 (só o RÁPIDO, dentro do request): aceita a imagem do
+            // RSS se ela passar nome-de-arquivo + HEAD + reuso pela fonte —
+            // nenhum desses baixa o corpo da imagem, então é seguro rodar
+            // pra toda notícia nova sem arriscar travar a resposta.
             //
-            // Custo extra de rede (busca a página de cada notícia nova, em
-            // vez de só quando o RSS falha) é absorvido pelo cache de 14
-            // dias em buscarOgImage — só paga essa busca uma vez por link.
-            //
-            // imagemEhAceitavel roda 4 filtros em ordem de custo (do mais
-            // barato pro mais caro, pra sair rápido no primeiro que reprovar):
-            //   1. nome do arquivo (regex, de graça) — ícone/logo/avatar óbvio
-            //   2. validarImagem (HEAD) — content-type e tamanho em bytes
-            //   3. reuso pela mesma fonte (Redis) — mesma URL em 2+ artigos
-            //      diferentes é sinal de logo/capa padrão do feed
-            //   4. dimensão REAL da imagem (baixa uns KB de verdade) —
-            //      pega o caso que os 3 anteriores não pegam: um logo/ícone
-            //      quadrado com bastante fundo sólido passa fácil no corte
-            //      de bytes do HEAD, mas continua pequeno de verdade
-            // Isso evita que qualquer um desses casos seja aceito como thumb
-            // "válida" e nunca caia na fila de heurística/IA (ver
-            // lib/processarFilaThumbs.js).
-            async function imagemEhAceitavel(url) {
-              if (!url) return false
-              if (imagemPareceGenericaPeloNome(url)) return false
-              if (!(await validarImagem(url))) return false
-              const usos = await contarUsoImagemPorFonte(fonte.id, url)
-              if (usos > 1) return false
-              if (await imagemEhPequenaDemais(url)) return false
-              return true
-            }
-
+            // og:image e a checagem de dimensão REAL (que baixa uns KB de
+            // verdade) foram tirados de aqui de propósito: rodar isso
+            // inline, pra toda notícia nova, foi o que causou
+            // FUNCTION_INVOCATION_TIMEOUT. Quem não passa aqui vai pra
+            // fila:sem-thumb e é resolvido em background — og:image
+            // primeiro, heurística/IA depois — em lib/processarFilaThumbs.js.
             await limitarConcorrencia(
               noticias.map((n) => async () => {
-                const og = await buscarOgImage(n.link)
-                if (og && (await imagemEhAceitavel(og))) {
-                  n.imagemUrl = og
-                  n.imagemFonte = 'og'
-                  n.imagemPaginaOrigem = n.link
-                  return
-                }
-
-                if (n.imagemUrl && (await imagemEhAceitavel(n.imagemUrl))) {
+                if (n.imagemUrl && (await imagemPassaChecagensRapidas(n.imagemUrl, fonte.id))) {
                   n.imagemFonte = 'rss'
                   return
                 }
-
-                // nem og:image nem RSS se sustentam — não deixa a URL ruim
-                // (ou genérica/pequena) passar pro front pra não renderizar
-                // um logo como se fosse a capa do artigo
                 n.imagemUrl = null
               }),
               CONCORRENCIA_OG_IMAGE
@@ -243,9 +199,22 @@ export default async function handler(req, res) {
       // request normal — só quando ninguém mais pegou o lock nos últimos 20s.
       // Isolado em try/catch próprio: se a IA ou o provedor de imagem falhar,
       // isso NUNCA pode derrubar a resposta do feed em si.
+      //
+      // Agora que resolverThumb tenta og:image antes da IA (ver
+      // lib/processarFilaThumbs.js), cada item pode envolver 2 requests de
+      // rede reais (página + imagem), não só uma chamada de IA/heurística.
+      // Por isso o teto de tempo próprio aqui: se passar de
+      // ORCAMENTO_OPORTUNISTA_MS, desiste e responde o feed do mesmo jeito —
+      // o que não deu tempo de processar continua na fila pro próximo
+      // request ou pro cron. Nunca deixa esse "de carona" comer o orçamento
+      // inteiro dos 30s da function.
+      const ORCAMENTO_OPORTUNISTA_MS = 12_000
       try {
         if (await tentarAdquirirLockOportunista()) {
-          await processarLoteFilaThumbs(LOTE_ENRIQUECIMENTO_OPORTUNISTA)
+          await Promise.race([
+            processarLoteFilaThumbs(LOTE_ENRIQUECIMENTO_OPORTUNISTA),
+            new Promise((resolve) => setTimeout(resolve, ORCAMENTO_OPORTUNISTA_MS))
+          ])
         }
       } catch (err) {
         console.error('[roxnews] enriquecimento oportunista falhou (feed segue normal):', err.message)
