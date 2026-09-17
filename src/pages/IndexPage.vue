@@ -86,6 +86,12 @@ const tagsVisiveis = computed(() =>
 async function atualizar(done) {
   feed.noticias = []
   feed.temMais = true
+  // sem isso, o pull-to-refresh limpava a lista na tela mas continuava
+  // pedindo notícia a partir de onde o usuário tinha parado de rolar —
+  // ignorando tudo que entrou no topo do feed desde então. É isso que
+  // fazia parecer que "não tem nada novo": o cursor nunca voltava pro
+  // topo do ZSET pra olhar de novo.
+  feed._cursor = 0
   try {
     await feed.carregarMais()
   } finally {
