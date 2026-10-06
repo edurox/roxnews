@@ -110,6 +110,15 @@ async function carregarProximoLote(index, done) {
 }
 
 function abrirNoticia(noticia) {
+  // Fonte marcada como "não abre em webview" (abre_webview = false no
+  // catálogo): vai direto pro navegador, sem abrir o dialog. Isso precisa
+  // acontecer aqui, dentro do clique do usuário — se esperasse o dialog
+  // renderizar, o navegador poderia bloquear o window.open como popup.
+  if (noticia.abreWebview === false) {
+    window.open(noticia.link, '_blank', 'noopener,noreferrer')
+    return
+  }
+
   noticiaSelecionada.value = noticia
   webviewAberta.value = true
 }
