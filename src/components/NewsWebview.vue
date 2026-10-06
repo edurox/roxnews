@@ -13,8 +13,8 @@
         <iframe
           :src="noticia.link"
           class="rox-iframe"
-          @load="carregando = false"
-          @error="falhouEmbed = true"
+          @load="aoCarregarIframe"
+          @error="marcarBloqueio"
           referrerpolicy="no-referrer"
         />
 
@@ -70,15 +70,48 @@ const emit = defineEmits(['update:modelValue', 'bloqueio-detectado'])
 const carregando = ref(true)
 const falhouEmbed = ref(false)
 
+// Limiar de "carregou rápido demais pra ser a página de verdade": um site de
+// notícia de verdade (com anúncio, tracker, imagem) não termina de carregar
+// em menos de ~800ms. Quando o Firefox bloqueia por X-Frame-Options/CSP, ele
+// renderiza a PRÓPRIA tela de erro dentro do iframe e dispara @load como se
+// fosse um carregamento normal — isso teoricamente deveria ser quase
+// instantâneo, então usamos o tempo decorrido pra desconfiar.
+const LIMIAR_CARGA_SUSPEITA_MS = 800
+// Teto pro caso do Chrome, que costuma deixar o iframe em branco sem
+// disparar @load nem @error quando bloqueia — sem isso, ficaríamos esperando
+// pra sempre.
+const TIMEOUT_SEM_RESPOSTA_MS = 5000
+
+let inicioCarregamento = 0
+let timeoutId = null
+
+function marcarBloqueio() {
+  if (falhouEmbed.value) return // já marcado, evita emitir duas vezes
+  falhouEmbed.value = true
+  carregando.value = false
+  if (timeoutId) clearTimeout(timeoutId)
+  if (props.noticia) emit('bloqueio-detectado', props.noticia.fonteId)
+}
+
+function aoCarregarIframe() {
+  const decorrido = Date.now() - inicioCarregamento
+  if (decorrido < LIMIAR_CARGA_SUSPEITA_MS) {
+    marcarBloqueio()
+    return
+  }
+  carregando.value = false
+}
+
 // Se a fonte já está marcada como "não abre em webview" (catálogo), nem
-// tenta o iframe — vai direto pro fallback, sem o usuário esperar o timeout
-// de novo. Só dispara o evento de "detectei agora" quando isso ainda NÃO
-// era conhecido, pra não ficar reenviando a mesma notificação toda vez que
-// a pessoa abre outra notícia da mesma fonte.
+// tenta o iframe — vai direto pro fallback, sem esperar nada de novo. Só
+// dispara o evento de "detectei agora" quando isso ainda NÃO era conhecido,
+// pra não ficar reenviando a mesma notificação toda vez que a pessoa abre
+// outra notícia da mesma fonte.
 watch(
   () => props.noticia,
   (novaNoticia) => {
     if (!novaNoticia) return
+    if (timeoutId) clearTimeout(timeoutId)
 
     if (novaNoticia.abreWebview === false) {
       carregando.value = false
@@ -88,12 +121,10 @@ watch(
 
     carregando.value = true
     falhouEmbed.value = false
-    setTimeout(() => {
-      if (carregando.value) {
-        falhouEmbed.value = true
-        emit('bloqueio-detectado', novaNoticia.fonteId)
-      }
-    }, 5000)
+    inicioCarregamento = Date.now()
+    timeoutId = setTimeout(() => {
+      if (carregando.value) marcarBloqueio()
+    }, TIMEOUT_SEM_RESPOSTA_MS)
   },
   { immediate: true }
 )
