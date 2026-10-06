@@ -8,7 +8,8 @@ create table if not exists fontes_rss (
   url_rss text not null,
   idioma text not null default 'pt-br',  -- 'pt-br' | 'en'
   categoria_padrao text,            -- 'tecnologia' | 'jogos' | 'regional-chapeco' | 'geral' etc
-  ativo boolean not null default true
+  ativo boolean not null default true,
+  abre_webview boolean not null default true  -- false = app pula direto pro link externo, sem tentar iframe
 );
 
 -- Tags de interesse do usuário (texto livre, casado por palavra-chave no título/resumo)
@@ -49,10 +50,13 @@ create policy "bloqueadas: dono le/escreve" on fontes_bloqueadas
 create policy "seguidas: dono le/escreve" on fontes_seguidas
   for all using (auth.uid() = usuario_id) with check (auth.uid() = usuario_id);
 
--- fontes_rss é público pra leitura (catálogo), sem RLS de escrita pro usuário comum
+-- fontes_rss é público pra leitura (catálogo); escrita só pra marcar
+-- abre_webview (feito via API, não editado solto pelo app)
 alter table fontes_rss enable row level security;
 create policy "fontes: leitura publica" on fontes_rss
   for select using (true);
+create policy "fontes: autenticado atualiza" on fontes_rss
+  for update using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 -- Seed inicial de fontes (ajuste/complemente depois de validar os RSS reais)
 insert into fontes_rss (id, nome, url_rss, idioma, categoria_padrao) values

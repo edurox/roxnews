@@ -109,6 +109,34 @@ export const useFeedStore = defineStore('feed', {
           }
     },
 
+    // Chamado pelo NewsWebview na primeira vez que detecta bloqueio de iframe
+    // pra essa fonte. Marca no catálogo (compartilhado — é um fato técnico
+    // sobre o site, não preferência pessoal) pra nunca mais tentar o embed
+    // dessa fonte de novo, nem pra outras notícias já carregadas na tela.
+    async desabilitarWebview(fonteId) {
+      this.noticias.forEach((n) => {
+        if (n.fonteId === fonteId) n.abreWebview = false
+      })
+
+      const { data: sessao } = await supabase.auth.getSession()
+      const token = sessao?.session?.access_token
+      if (!token) return
+
+      try {
+        await fetch('/api/fontes-desabilitar-webview', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({ fonteId })
+        })
+      } catch {
+        // sem problema — na pior das hipóteses, essa fonte específica tenta
+        // o embed de novo na próxima vez e é redetectada
+      }
+    },
+
     async bloquearFonte(fonteId) {
       const { data: sessao } = await supabase.auth.getSession()
       const token = sessao?.session?.access_token

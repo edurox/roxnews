@@ -7,7 +7,7 @@ export default async function handler(req, res) {
 
   const { data, error } = await supabase
     .from('fontes_rss')
-    .select('id, nome, idioma, categoria_padrao, ativo')
+    .select('id, nome, idioma, categoria_padrao, ativo, abre_webview')
     .order('nome', { ascending: true })
 
   if (error) return res.status(500).json({ erro: error.message })

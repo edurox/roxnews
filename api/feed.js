@@ -180,6 +180,14 @@ export default async function handler(req, res) {
         fontes.map((f) => [f.id, (f.categoria_padrao || '').toLowerCase()])
       )
 
+      // Lido ao vivo da tabela, igual categoriaPorFonte acima — assim, quando
+      // o NewsWebview detecta bloqueio de iframe e marca a fonte via
+      // /api/fontes-desabilitar-webview, o efeito aparece na PRÓXIMA resposta
+      // do feed sem precisar esperar TTL nem rebuscar o RSS.
+      const abreWebviewPorFonte = new Map(
+        fontes.map((f) => [f.id, f.abre_webview !== false])
+      )
+
       function normalizar(s) {
         return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
       }
@@ -332,7 +340,11 @@ export default async function handler(req, res) {
         return intercalado
       }
 
-      const lote = diluirEIntercalarPorFonte(resultado, MAX_POR_FONTE_NO_LOTE, TAMANHO_LOTE)
+      const loteBruto = diluirEIntercalarPorFonte(resultado, MAX_POR_FONTE_NO_LOTE, TAMANHO_LOTE)
+      const lote = loteBruto.map((n) => ({
+        ...n,
+        abreWebview: abreWebviewPorFonte.get(n.fonteId) ?? true
+      }))
 
       // proximoOffset/esgotado vêm do Redis (posição real no ZSET), não do
       // tamanho do lote filtrado — é isso que deixa a paginação avançar de

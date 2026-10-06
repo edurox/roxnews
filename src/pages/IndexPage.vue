@@ -61,7 +61,11 @@
       </div>
     </q-pull-to-refresh>
 
-    <NewsWebview v-model="webviewAberta" :noticia="noticiaSelecionada" />
+    <NewsWebview
+      v-model="webviewAberta"
+      :noticia="noticiaSelecionada"
+      @bloqueio-detectado="feed.desabilitarWebview"
+    />
   </q-page>
 </template>
 

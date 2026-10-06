@@ -9,7 +9,7 @@
 
       <q-linear-progress v-if="carregando" indeterminate color="primary" />
 
-      <div v-if="noticia && !falhouEmbed" class="rox-iframe-wrap">
+      <div v-if="noticia && noticia.abreWebview !== false && !falhouEmbed" class="rox-iframe-wrap">
         <iframe
           :src="noticia.link"
           class="rox-iframe"
@@ -37,7 +37,10 @@
         />
       </div>
 
-      <div v-else-if="falhouEmbed" class="rox-fallback column items-center justify-center q-pa-xl">
+      <div
+        v-else-if="noticia && (falhouEmbed || noticia.abreWebview === false)"
+        class="rox-fallback column items-center justify-center q-pa-xl"
+      >
         <p class="rox-summary text-center">
           Essa fonte não permite abrir dentro do app. Abra direto no site original.
         </p>
@@ -62,21 +65,37 @@ const props = defineProps({
   noticia: { type: Object, default: null }
 })
 
-defineEmits(['update:modelValue'])
+const emit = defineEmits(['update:modelValue', 'bloqueio-detectado'])
 
 const carregando = ref(true)
 const falhouEmbed = ref(false)
 
-// timeout de segurança: se o iframe não carregar em X segundos, assume bloqueio
+// Se a fonte já está marcada como "não abre em webview" (catálogo), nem
+// tenta o iframe — vai direto pro fallback, sem o usuário esperar o timeout
+// de novo. Só dispara o evento de "detectei agora" quando isso ainda NÃO
+// era conhecido, pra não ficar reenviando a mesma notificação toda vez que
+// a pessoa abre outra notícia da mesma fonte.
 watch(
   () => props.noticia,
-  () => {
+  (novaNoticia) => {
+    if (!novaNoticia) return
+
+    if (novaNoticia.abreWebview === false) {
+      carregando.value = false
+      falhouEmbed.value = false // o v-else-if já cobre abreWebview === false
+      return
+    }
+
     carregando.value = true
     falhouEmbed.value = false
     setTimeout(() => {
-      if (carregando.value) falhouEmbed.value = true
+      if (carregando.value) {
+        falhouEmbed.value = true
+        emit('bloqueio-detectado', novaNoticia.fonteId)
+      }
     }, 5000)
-  }
+  },
+  { immediate: true }
 )
 </script>
 
